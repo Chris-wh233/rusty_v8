@@ -120,11 +120,21 @@ For linux builds: glib-2.0 development files need to be installed such that
 pkg-config can find them. On Ubuntu, run `sudo apt install libglib2.0-dev` to
 install them.
 
-Additionally, building from source requires libclang 19+ for bindgen:
+For LoongArch64 Linux builds: upstream rusty_v8 does not publish prebuilt
+archives for `loongarch64-unknown-linux-gnu`, so the build script defaults to a
+source build for this target unless `RUSTY_V8_ARCHIVE` or `RUSTY_V8_MIRROR` is
+provided. Prepare `gn`, `ninja`, Rust, clang/libclang 19+, and Python 3
+before building. On LoongArch64, the build script will not download Chromium
+CIPD prebuilt `gn`/`ninja`, Rust, or clang binaries; install them in `PATH` or
+set `GN`, `NINJA`, `RUSTC`, `CLANG_BASE_PATH`, and `LIBCLANG_PATH` explicitly:
 
 ```bash
-sudo apt install libclang-19-dev
-export LIBCLANG_PATH=/usr/lib/llvm-19/lib
+export CLANG_BASE_PATH=/usr/lib/llvm-21
+export LIBCLANG_PATH=/usr/lib/llvm-21/lib
+export RUSTC_BOOTSTRAP=1
+export RUSTC=/usr/local/rustup/toolchains/1.91.0-loongarch64-unknown-linux-gnu/bin/rustc
+export EXTRA_GN_ARGS='rust_bindgen_root="/usr/local/cargo" clang_version="21" clang_use_chrome_plugins=false'
+V8_FROM_SOURCE=1 cargo build --release
 ```
 
 For Windows builds: the 64-bit toolchain needs to be used. 32-bit targets are

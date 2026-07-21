@@ -100,7 +100,7 @@ fn main() {
   let _lockfile = acquire_lock();
 
   // Build from source
-  if env_bool("V8_FROM_SOURCE") {
+  if should_build_from_source() {
     if is_asan && env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
       panic!(
         "v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues."
@@ -255,14 +255,13 @@ fn build_v8(is_asan: bool) {
     download_ninja_gn_binaries();
   }
 
-  download_rust_toolchain();
-
   // `#[cfg(...)]` attributes don't work as expected from build.rs -- they refer to the configuration
   // of the host system which the build.rs script will be running on. In short, `cfg!(target_<os/arch>)`
   // is actually the host os/arch instead of target os/arch while cross compiling. Instead, Environment variables
   // are the officially approach to get the target os/arch in build.rs.
   let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
   let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  let use_local_toolchain = target_arch == "loongarch64" || host_is_loongarch64();
   // On windows, rustc cannot link with a V8 debug build.
   let mut gn_args = if is_debug() && target_os != "windows" {
     // Note: When building for Android aarch64-qemu, use release instead of debug.
@@ -270,6 +269,13 @@ fn build_v8(is_asan: bool) {
   } else {
     vec!["is_debug=false".to_string()]
   };
+
+  if use_local_toolchain {
+    configure_local_rust_toolchain(&mut gn_args);
+  } else {
+    download_rust_toolchain();
+  }
+
   if is_asan {
     gn_args.push("is_asan=true".to_string());
   }
@@ -331,6 +337,10 @@ fn build_v8(is_asan: bool) {
     println!("clang_base_path (system): {}", clang_base_path.display());
     gn_args.push(format!("clang_base_path={clang_base_path:?}"));
     gn_args.push("treat_warnings_as_errors=false".to_string());
+  } else if use_local_toolchain {
+    panic!(
+      "Prepare clang by yourself when building on LoongArch64."
+    );
   } else {
     println!("using Chromium's clang");
     let clang_base_path = clang_download();
@@ -396,6 +406,11 @@ fn build_v8(is_asan: bool) {
     gn_args.push("use_sysroot=true".to_string());
     maybe_install_sysroot("i386");
     maybe_install_sysroot("arm");
+  }
+  if target_arch == "loongarch64" {
+    gn_args.push(r#"target_cpu="loong64""#.to_string());
+    gn_args.push(r#"v8_target_cpu="loong64""#.to_string());
+    gn_args.push("treat_warnings_as_errors=false".to_string());
   }
 
   let target_triple = env::var("TARGET").unwrap();
@@ -507,6 +522,12 @@ fn maybe_install_sysroot(arch: &str) {
 }
 
 fn download_ninja_gn_binaries() {
+  if host_is_loongarch64() {
+    panic!(
+      "Prepare GN/Ninja by yourself when building on LoongArch64."
+    );
+  }
+
   let target_dir = build_dir().join("ninja_gn_binaries");
 
   let gn = target_dir.join("gn").join("gn");
@@ -549,6 +570,70 @@ fn download_rust_toolchain() {
   );
 }
 
+fn configure_local_rust_toolchain(gn_args: &mut Vec<String>) {
+  let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+
+  let sysroot_output = Command::new(&rustc)
+    .arg("--print")
+    .arg("sysroot")
+    .output()
+    .expect("Could not run `rustc --print sysroot`");
+  assert!(
+    sysroot_output.status.success(),
+    "`rustc --print sysroot` failed"
+  );
+  let rust_sysroot_absolute = String::from_utf8(sysroot_output.stdout)
+    .expect("rustc sysroot is not UTF-8")
+    .trim()
+    .to_string();
+  assert!(
+    !rust_sysroot_absolute.is_empty(),
+    "`rustc --print sysroot` returned an empty path"
+  );
+
+  let version_output = Command::new(&rustc)
+    .arg("-V")
+    .output()
+    .expect("Could not run `rustc -V`");
+  assert!(version_output.status.success(), "`rustc -V` failed");
+  let rustc_version_output = String::from_utf8(version_output.stdout)
+    .expect("rustc version is not UTF-8")
+    .trim()
+    .to_string();
+  let rustc_version = sanitize_rustc_version(&rustc_version_output);
+
+  println!("rust_sysroot_absolute (system): {rust_sysroot_absolute}");
+  println!("rustc_version (system): {rustc_version_output}");
+  println!("rustc_version (gn): {rustc_version}");
+  gn_args.push(format!(
+    "rust_sysroot_absolute={rust_sysroot_absolute:?}"
+  ));
+  gn_args.push(format!("rustc_version={rustc_version:?}"));
+}
+
+fn sanitize_rustc_version(version: &str) -> String {
+  let version = version.trim().strip_prefix("rustc ").unwrap_or(version.trim());
+  let mut sanitized = String::new();
+  let mut previous_was_separator = false;
+
+  for ch in version.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+      sanitized.push(ch);
+      previous_was_separator = false;
+    } else if !previous_was_separator {
+      sanitized.push('-');
+      previous_was_separator = true;
+    }
+  }
+
+  while sanitized.ends_with('-') {
+    sanitized.pop();
+  }
+
+  assert!(!sanitized.is_empty(), "rustc version is empty after sanitizing");
+  sanitized
+}
+
 fn prebuilt_profile() -> &'static str {
   let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
   // Use v8 in release mode unless $V8_FORCE_DEBUG=true
@@ -572,6 +657,16 @@ fn prebuilt_features_suffix() -> String {
     features.push_str("_simdutf");
   }
   features
+}
+
+fn should_build_from_source() -> bool {
+  if env_bool("V8_FROM_SOURCE") {
+    return true;
+  }
+
+  env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "loongarch64")
+    && env::var_os("RUSTY_V8_ARCHIVE").is_none()
+    && env::var_os("RUSTY_V8_MIRROR").is_none()
 }
 
 fn static_lib_name(suffix: &str) -> String {
@@ -911,6 +1006,10 @@ fn not_in_depot_tools(p: PathBuf) -> bool {
   !p.to_str().unwrap().contains("depot_tools")
 }
 
+fn host_is_loongarch64() -> bool {
+  env::var("HOST").is_ok_and(|host| host.starts_with("loongarch64-"))
+}
+
 fn need_gn_ninja_download() -> bool {
   let has_ninja = which("ninja").is_ok_and(not_in_depot_tools)
     || env::var_os("NINJA").is_some();
@@ -946,7 +1045,15 @@ fn find_compatible_system_clang() -> Option<PathBuf> {
     }
   }
 
-  None
+  let clang_path = which("clang").ok()?;
+  if !is_compatible_clang_version(&clang_path) {
+    return None;
+  }
+
+  clang_path
+    .parent()
+    .and_then(Path::parent)
+    .map(Path::to_path_buf)
 }
 
 // Download chromium's clang into OUT_DIR because Cargo will not allow us to

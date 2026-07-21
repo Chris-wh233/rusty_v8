@@ -27,6 +27,8 @@ def get_platform():
         machine = 'amd64'
     elif machine == 'aarch64':
         machine = 'arm64'
+    elif machine in ('loongarch64', 'loong64'):
+        machine = 'loong64'
 
     return f'{system}-{machine}'
 
