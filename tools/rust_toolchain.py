@@ -20,6 +20,8 @@ if host_cpu == "x86_64":
     host_cpu = "x64"
 elif host_cpu == "aarch64":
     host_cpu = "arm64"
+elif host_cpu in ("loongarch64", "loong64"):
+    host_cpu = "loong64"
 
 eval_globals = {
     'host_os': host_os,
@@ -27,7 +29,11 @@ eval_globals = {
 }
 
 dep = deps[DIR]
-obj = next(obj for obj in dep['objects'] if eval(obj['condition'], eval_globals))
+try:
+    obj = next(obj for obj in dep['objects'] if eval(obj['condition'], eval_globals))
+except StopIteration:
+    print(f'{DIR}: no prebuilt Chromium Rust toolchain for {host_os}-{host_cpu}; using system toolchain')
+    sys.exit()
 bucket = dep['bucket']
 name = obj['object_name']
 url = f'https://storage.googleapis.com/{bucket}/{name}'
